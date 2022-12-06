@@ -1,8 +1,10 @@
+-- CREATE OR REPLACE VIEW "CDS_PROD"."DM_SANDBOX"."DC_MSP_CONTRACT_DETAILS_HISTORY" AS
+
 with all_msp_contracts as (
 
     select 
             c.accountid as sf_account_id
-            ,a.parentid
+            ,nullif(a.parentid,'') as parentid
             ,a.partner_type
             ,o.id as opportunity_id
             ,u.name as account_owner_name
@@ -13,8 +15,9 @@ with all_msp_contracts as (
             ,c.sub_status
             ,c.mspbillingtype
             ,date(case when o.name like '%Evergreen Migration%' then coalesce(nullif(c.startdate,''),nullif(o.closedate,''))
-                  when o.stagename in ('Closed Won','Closed Won-Finance') then coalesce(nullif(o.closedate,''),nullif(c.startdate,'')) 
-                else nullif(c.startdate,'') end) as contract_startdate
+                  when o.stagename in ('Closed Won','Closed Won-Finance') then coalesce(nullif(o.closedate,''),nullif(c.startdate,''))
+                else nullif(c.startdate,'') end) as effective_startdate
+            ,try_to_date(c.startdate) as contract_startdate
             ,coalesce(nullif(c.date_of_cancellation,''),nullif(c.enddate,'')) as contract_enddate
             ,lag(c.sub_status,1) over (partition by sf_account_id order by contract_name asc) as previous_substatus
         from cds_prod.dm_sales.sf_contract_cds c
@@ -27,8 +30,42 @@ with all_msp_contracts as (
             /*sf_account_id = '0012H00001Z3NKUQA3'
             and */(a.test_account = false or a.test_account is null)
             and (lower(o.po) not like '%usage%' or lower(o.po) is null)
-            and (contract_enddate >= '2020-07-01' or nullif(contract_enddate,'') is null)
-        group by 1,2,3,4,5,6,7,8,9,10,11,12,13
+            and (nullif(contract_enddate,'') is null or contract_enddate >= '2020-07-01')
+        group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14
+    
+    UNION ALL
+    
+    --union to add in closed opportunities with no contract created
+    select 
+        a.id as sf_account_id
+        ,nullif(a.parentid,'') as parentid
+        ,a.partner_type
+        ,o.id as opporrunity_id
+        ,u.name as account_owner_name
+        ,u1.name as opportunity_owner_name
+        ,nullif(o2.contract_id,'') as contract_id
+        ,null as contract_name
+        ,null as status
+        ,null as sub_status
+        ,nullif(a.mspbillingtype,'') as msp_billing_type
+        ,try_to_date(o2.activateddate) as effective_startdate
+        ,try_to_date(o2.effectivedate) as contract_startdate
+        ,null as contract_enddate
+        ,null as previous_substatus
+
+    from cds_prod.dm_sales.sf_opportunity_cds o 
+    left join cds_prod.dm_sales.sf_account_cds a on o.accountid = a.id
+    left join cds_prod.dm_sales.sf_order_cds o2 on o2.opportunityid = o.id
+    left join cds_prod.dm_sales.sf_user_cds u on a.ownerid = u.id
+    left join cds_prod.dm_sales.sf_user_cds u1 on o.ownerid = u1.id
+
+    where 
+        o.type = 'New Business' 
+        and o.stagename in ('Closed Won','Closed Won-Finance') 
+        and a.partner_type = 'MSP' and o2.status = 'Activated' 
+        and try_to_date(o2.effectivedate) > try_to_date(o.closedate) 
+        and nullif(o2.contract_id,'') is null 
+        and try_to_date(o2.effectivedate) > '2021-01-31'
 
 )
 ,
@@ -60,20 +97,20 @@ all_msp_contracts_details as (
               else a.partner_tier1 end 
                         as partner_tier
         ,a.geo
-        ,lead(partner_tier,1) over (partition by sf_account_id order by contract_startdate asc) as next_partner_tier
-        ,lead(a.geo,1) over (partition by sf_account_id order by contract_startdate asc) as next_geo
-        ,lag(contract_startdate,1) over (partition by sf_account_id order by contract_name asc) as previous_startdate
+        ,lead(partner_tier,1) over (partition by sf_account_id order by effective_startdate asc) as next_partner_tier
+        ,lead(a.geo,1) over (partition by sf_account_id order by effective_startdate asc) as next_geo
+        ,lag(effective_startdate,1) over (partition by sf_account_id order by contract_name asc) as previous_effectivedate
         ,case when previous_substatus = 'Converted to Evergreen' then lag(contract_enddate,2) over (partition by sf_account_id order by contract_name asc)
         else lag(contract_enddate,1) over (partition by sf_account_id order by contract_name asc) end as previous_enddate
         ,dense_rank() over (partition by sf_account_id order by contract_name asc) as contract_rank
 
     from all_msp_contracts main
     
-    left join cds_prod.dm_sales.sf_account_cds_history a on a.id = main.sf_account_id and date(a.cds_insert_ts) = main.contract_startdate
+    left join cds_prod.dm_sales.sf_account_cds_history a on a.id = main.sf_account_id and date(a.cds_insert_ts) = main.effective_startdate
     
     left join dynamicusage_rank d on main.sf_account_id = d.id
     
-    group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17
+    group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18
     
 )
 
@@ -86,9 +123,10 @@ all_msp_contracts_net_new as (
         ,main.parentid
         ,main.opportunity_id
         ,main.contract_id
-        ,case when main.contract_rank > 1 and main.previous_substatus = 'Converted to Evergreen' then coalesce(main.previous_startdate,main.contract_startdate) 
-            when main.sf_account_id = '0012H00001fo2OIQAY' then '2022-06-20' else main.contract_startdate end as effective_startdate
-        ,main.contract_enddate
+        ,case when main.contract_rank > 1 and main.previous_substatus = 'Converted to Evergreen' then coalesce(main.previous_effectivedate,main.effective_startdate) 
+            when main.sf_account_id = '0012H00001fo2OIQAY' then '2022-06-20' else main.effective_startdate end as effective_startdate
+        ,try_to_date(main.contract_startdate) as contract_startdate
+        ,try_to_date(main.contract_enddate) as contract_enddate
         ,main.mspbillingtype as contract_billingtype
         ,main.status as contract_status
         ,main.sub_status as contract_substatus
@@ -97,14 +135,20 @@ all_msp_contracts_net_new as (
         ,coalesce(main.partner_tier,main.next_partner_tier) as partner_tier
         ,coalesce(main.geo,main.next_geo) as geo
         ,case 
-            when contract_status = 'Cancelled' and last_day(date(effective_startdate)) = last_day(date(contract_enddate)) then false
+            when contract_status = 'Cancelled' and last_day(date(effective_startdate)) = last_day(try_to_date(contract_enddate)) then false
             when contract_substatus in ('Moved to Direct to 2-Tier','Moved to 2-Tier to Direct','2-Tier Parent Switch') then false
             when main.contract_rank = 1 and contract_substatus not in ('Migration') then true
-            when datediff(day,main.previous_enddate,main.contract_startdate) >= 90 and contract_substatus not in ('Moved to Direct to 2-Tier','Moved to 2-Tier to Direct','2-Tier Parent Switch') then true
+            when main.contract_rank = 1 and contract_id is null then true
+            when datediff(day,main.previous_enddate,main.effective_startdate) >= 90 and contract_substatus not in ('Moved to Direct to 2-Tier','Moved to 2-Tier to Direct','2-Tier Parent Switch') then true
             when main.contract_rank = 2 and main.previous_substatus = 'Converted to Evergreen' and contract_substatus not in ('Moved to Direct to 2-Tier','Moved to 2-Tier to Direct','2-Tier Parent Switch') then true
             when main.contract_id = '8002H000002Za9UQAS' and contract_substatus not in ('Migration') then true --one off data hygiene issue
             else false end 
             as net_new_qualify
+        ,case
+            when contract_status in ('Cancelled') and contract_substatus in ('Terminated via API','Termination','Refunded','Collections','Master Contract Cancelled','Non-renewal','Suspended Via API','') and last_day(effective_startdate) <> last_day(date(nullif(contract_enddate,''))) then true
+            when contract_status in ('Expired') and contract_substatus in ('Non-renewal','') and last_day(effective_startdate) <> last_day(date(nullif(contract_enddate,''))) then true
+            else false end
+            as churn_qualify
         ,main.msp_type_new
     
     from all_msp_contracts_details main
@@ -113,6 +157,7 @@ all_msp_contracts_net_new as (
    
 )
 
+--MAIN QUERY
 select
     a.*
     ,b.name as parent_company_name
