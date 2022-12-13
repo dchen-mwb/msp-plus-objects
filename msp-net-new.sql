@@ -157,6 +157,9 @@ all_msp_contracts_net_new as (
    
 )
 
+--CHECK QUERY
+-- select * from all_msp_contracts_details where sf_account_id = '0013400001JhliAAAR'
+
 --MAIN QUERY
 select
     a.*
