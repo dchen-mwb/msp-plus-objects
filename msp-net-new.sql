@@ -1,4 +1,4 @@
--- CREATE OR REPLACE VIEW "CDS_PROD"."DM_SANDBOX"."DC_MSP_CONTRACT_DETAILS_HISTORY" AS
+--CREATE OR REPLACE VIEW "CDS_PROD"."DM_SANDBOX"."DC_MSP_CONTRACT_DETAILS_HISTORY" AS
 
 with all_msp_contracts as (
 
@@ -7,6 +7,7 @@ with all_msp_contracts as (
             ,nullif(a.parentid,'') as parentid
             ,a.partner_type
             ,o.id as opportunity_id
+            ,o2.orderid
             ,u.name as account_owner_name
             ,u1.name as opportunity_owner_name
             ,c.id as contract_id
@@ -25,13 +26,38 @@ with all_msp_contracts as (
         left join cds_prod.dm_sales.sf_account_cds a on a.id = c.accountid
         left join cds_prod.dm_sales.sf_user_cds u on a.ownerid = u.id
         left join cds_prod.dm_sales.sf_user_cds u1 on o.ownerid = u1.id
+        left join (
+            select * 
+            from (
+                select 
+                    o.accountid
+                    ,try_to_date(o.activateddate) as activated_date
+                    -- ,try_to_date(o.effectivedate) as effective_date
+                    ,o.status
+                    ,o.contract_id
+                    ,o.id as orderid
+                    ,dense_rank() over (partition by o.accountid,o.contract_id order by activated_date asc) as order_rank
+
+                from cds_prod.dm_sales.sf_order_cds o
+
+                left join cds_prod.dm_sales.sf_account_cds a on o.accountid = a.id
+                    where 
+                    -- o.contract_id = '8002H000002J72EQAS' and 
+                    o.status = 'Activated'
+                    and o.type = 'New'
+                    and a.partner_type = 'MSP'
+                    and a.test_account = false
+
+                )
+                where order_rank = 1
+        ) o2 on o2.contract_id = c.id
 
         where
             /*sf_account_id = '0012H00001Z3NKUQA3'
             and */(a.test_account = false or a.test_account is null)
             and (lower(o.po) not like '%usage%' or lower(o.po) is null)
             and (nullif(contract_enddate,'') is null or contract_enddate >= '2020-07-01')
-        group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14
+        group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
     
     UNION ALL
     
@@ -40,7 +66,8 @@ with all_msp_contracts as (
         a.id as sf_account_id
         ,nullif(a.parentid,'') as parentid
         ,a.partner_type
-        ,o.id as opporrunity_id
+        ,o.id as opportunity_id
+        ,o2.id as orderid
         ,u.name as account_owner_name
         ,u1.name as opportunity_owner_name
         ,nullif(o2.contract_id,'') as contract_id
@@ -92,7 +119,7 @@ all_msp_contracts_details as (
 
     select 
         main.*
-        ,coalesce(d.msp_type,a.msp_type) as msp_type_new
+        ,coalesce(nullif(d.msp_type,''),nullif(a.msp_type,''),m.msp_type) as msp_type_new
         ,case when msp_type_new ilike '%child%' then coalesce(nullif(d.dynamicusage_tier,''),'Registered') 
               else a.partner_tier1 end 
                         as partner_tier
@@ -110,7 +137,16 @@ all_msp_contracts_details as (
     
     left join dynamicusage_rank d on main.sf_account_id = d.id
     
-    group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18
+    -- add in msp_type for early signed contracts post msp_type field creation
+    left join (
+        select 
+            id
+            ,date(cds_history_insert_ts) as date
+            ,msp_type
+        from cds_prod.dm_sales.sf_account_cds_history
+            ) m on m.id = main.sf_account_id and m.date = main.contract_startdate
+    
+    group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
     
 )
 
@@ -122,6 +158,7 @@ all_msp_contracts_net_new as (
         main.sf_account_id
         ,main.parentid
         ,main.opportunity_id
+        ,main.orderid
         ,main.contract_id
         ,case when main.contract_rank > 1 and main.previous_substatus = 'Converted to Evergreen' then coalesce(main.previous_effectivedate,main.effective_startdate) 
             when main.sf_account_id = '0012H00001fo2OIQAY' then '2022-06-20' else main.effective_startdate end as effective_startdate
@@ -157,8 +194,6 @@ all_msp_contracts_net_new as (
    
 )
 
---CHECK QUERY
--- select * from all_msp_contracts_details where sf_account_id = '0013400001JhliAAAR'
 
 --MAIN QUERY
 select
