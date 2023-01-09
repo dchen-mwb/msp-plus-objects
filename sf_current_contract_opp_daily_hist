@@ -50,7 +50,6 @@ left join (
       where sub_status <> 'Converted to Evergreen' 
             and nullif(startdate,'') <= date(cds_insert_ts) -- exclude early starting contracts from replacing existing
             and date(nullif(createddate,'')) <= date(cds_insert_ts) -- exclude backfill from missed billings
-            and accountid = '0012H00001frCdcQAE'
             ) mx_dt on c.id = mx_dt.id and date(mx_dt.cds_history_insert_ts) = date(c.cds_history_insert_ts)
     
   left join cds_prod.dm_sales.sf_account_cds_history a on c.accountid = a.id and date(a.cds_history_insert_ts) = date(c.cds_history_insert_ts)
@@ -89,7 +88,6 @@ where
   and a.partner_type = 'MSP'
   and c.sub_status <> 'Converted to Evergreen'
   and (c.status = 'Activated' or (c.status in ('Cancelled','Expired') and c.cds_insert_ts <= dateadd(month, 2, date(coalesce(nullif(c.date_of_cancellation,''),nullif(c.enddate,'')))))) --keep cancelled/expired contracts up to a month then exclude
-  -- and sf_account_id = '0012H00001gSaq3QAC'
     
 order by 
   1 DESC, 8 DESC
@@ -97,7 +95,7 @@ order by
 )
 
 where contract_rank = 1
-and (cds_insert_date = last_day(cds_insert_date) or last_day(cds_insert_date) = last_day(current_date()))
+--and (cds_insert_date = last_day(cds_insert_date) or last_day(cds_insert_date) = last_day(current_date()))
 
 UNION ALL
 
@@ -109,6 +107,7 @@ select
     ,try_to_date(o2.effectivedate)                      as latest_contract_start_date
     ,date(null)                                         as latest_contract_end_date
     ,date(null)                                         as date_of_cancellation
+    ,null                                               as createddate
     ,o2.currencyisocode
     ,o2.payment_method                                  as paymentmethod
     ,o2.sbqq__paymentterm                               as paymentterms
@@ -143,6 +142,7 @@ where
     and try_to_date(o2.effectivedate) > try_to_date(o.closedate)
     and try_to_date(o2.effectivedate) > '2021-01-31'
     and cds_insert_date < try_to_date(o2.effectivedate)
+    --and (cds_insert_date = last_day(cds_insert_date) or last_day(cds_insert_date) = last_day(current_date()))
     
     ;
    
